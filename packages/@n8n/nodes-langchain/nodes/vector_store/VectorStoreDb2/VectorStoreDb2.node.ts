@@ -74,14 +74,18 @@ export class VectorStoreDb2 extends createVectorStoreNode({
 
 		// Add SSL configuration if enabled
 		if (credentials.ssl === true) {
-			const sslCertPath = credentials.sslCertificatePath as string;
+			// Support both old and new field names for backward compatibility
+			const sslCertPath = (credentials.sslCertificatePath || credentials.sslCertificate) as string;
 
 			// Validate SSL certificate path
 			if (!sslCertPath || sslCertPath.trim() === '') {
 				throw new NodeOperationError(
 					context.getNode(),
 					'SSL Certificate Path is required when SSL is enabled',
-					{ itemIndex },
+					{
+						itemIndex,
+						description: 'Please enter the path to your SSL certificate in the credentials',
+					},
 				);
 			}
 

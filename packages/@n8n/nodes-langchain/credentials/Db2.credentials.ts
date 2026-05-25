@@ -68,10 +68,9 @@ export class Db2 implements ICredentialType {
 				},
 			},
 			default: '',
-			required: true,
 			placeholder: '/path/to/certificate.crt',
 			description:
-				'Absolute path to the SSL/TLS certificate file (e.g., /path/to/DigiCertGlobalRootCA.crt)',
+				'Absolute path to the SSL/TLS certificate file (e.g., /path/to/DigiCertGlobalRootCA.crt). Required when SSL is enabled.',
 		},
 		{
 			displayName: 'Connection Timeout',
