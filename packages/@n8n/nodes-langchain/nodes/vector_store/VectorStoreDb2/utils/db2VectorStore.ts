@@ -331,38 +331,17 @@ export class DB2VectorStore extends VectorStore {
 				VALUES ('${idSanitized}', '${textSanitized}', '${metadataSanitized}', '${embeddingSanitized}')
 			`;
 
-			console.log('\n=== [DB2VectorStore] INSERT SQL (addVectors) - FULL QUERY ===');
-			console.log('Query:', sqlInsert);
-			console.log('Embedding value:', embeddingSanitized);
-			console.log('Embedding length:', embedding.length);
-			console.log('First 5 values:', embedding.slice(0, 5));
-			console.log('=== END QUERY ===\n');
-
 			try {
 				await new Promise((resolve, reject) => {
 					this.client.query(sqlInsert, (err: Error) => {
 						if (err) {
-							console.error('\n=== [DB2VectorStore] INSERT ERROR (addVectors) ===');
-							console.error('Error message:', err.message);
-							console.error('Error stack:', err.stack);
-							console.error('Failed query:', sqlInsert);
-							console.error('Embedding value that failed:', embeddingSanitized);
-							console.error('=== END ERROR ===\n');
 							reject(err);
 						} else {
-							console.log('[DB2VectorStore] Insert successful for ID:', id);
 							resolve(null);
 						}
 					});
 				});
 			} catch (error: any) {
-				console.error('\n=== [DB2VectorStore] CAUGHT INSERT ERROR (addVectors) ===');
-				console.error('Error:', error);
-				console.error('Error message:', error.message);
-				console.error('Error code:', error.code);
-				console.error('SQLSTATE:', error.state);
-				console.error('Failed SQL:', sqlInsert);
-				console.error('=== END CAUGHT ERROR ===\n');
 				throw error;
 			}
 		}
@@ -419,38 +398,17 @@ export class DB2VectorStore extends VectorStore {
 				VALUES ('${idSanitized}', '${textSanitized}', '${metadataSanitized}', '${embeddingSanitized}')
 			`;
 
-			console.log('\n=== [DB2VectorStore] INSERT SQL (addTexts) - FULL QUERY ===');
-			console.log('Query:', sqlInsert);
-			console.log('Embedding value:', embeddingSanitized);
-			console.log('Embedding length:', embedding.length);
-			console.log('First 5 values:', embedding.slice(0, 5));
-			console.log('=== END QUERY ===\n');
-
 			try {
 				await new Promise((resolve, reject) => {
 					this.client.query(sqlInsert, (err: Error) => {
 						if (err) {
-							console.error('\n=== [DB2VectorStore] INSERT ERROR (addTexts) ===');
-							console.error('Error message:', err.message);
-							console.error('Error stack:', err.stack);
-							console.error('Failed query:', sqlInsert);
-							console.error('Embedding value that failed:', embeddingSanitized);
-							console.error('=== END ERROR ===\n');
 							reject(err);
 						} else {
-							console.log('[DB2VectorStore] Insert successful for ID:', id);
 							resolve(null);
 						}
 					});
 				});
 			} catch (error: any) {
-				console.error('\n=== [DB2VectorStore] CAUGHT INSERT ERROR (addTexts) ===');
-				console.error('Error:', error);
-				console.error('Error message:', error.message);
-				console.error('Error code:', error.code);
-				console.error('SQLSTATE:', error.state);
-				console.error('Failed SQL:', sqlInsert);
-				console.error('=== END CAUGHT ERROR ===\n');
 				throw error;
 			}
 		}
@@ -519,22 +477,9 @@ export class DB2VectorStore extends VectorStore {
 			FETCH FIRST ${k} ROWS ONLY
 		`;
 
-		console.log('\n=== [DB2VectorStore] SIMILARITY SEARCH SQL - FULL QUERY ===');
-		console.log('Query:', query);
-		console.log('Embedding value:', embeddingSanitized);
-		console.log('Embedding length:', embedding.length);
-		console.log('Distance function:', distanceFunc);
-		console.log('=== END QUERY ===\n');
-
 		return new Promise((resolve, reject) => {
 			this.client.query(query, (err: Error, results: any[]) => {
 				if (err) {
-					console.error('\n=== [DB2VectorStore] SIMILARITY SEARCH ERROR ===');
-					console.error('Error message:', err.message);
-					console.error('Error stack:', err.stack);
-					console.error('Failed query:', query);
-					console.error('Embedding value that failed:', embeddingSanitized);
-					console.error('=== END ERROR ===\n');
 					reject(err);
 					return;
 				}
