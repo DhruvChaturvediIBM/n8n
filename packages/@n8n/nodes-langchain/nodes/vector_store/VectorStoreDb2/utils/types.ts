@@ -8,7 +8,7 @@ import type { Embeddings } from '@langchain/core/embeddings';
 /**
  * Distance strategy for similarity search
  */
-export enum DistanceStrategy {
+export const enum DistanceStrategy {
 	EUCLIDEAN = 'euclidean',
 	COSINE = 'cosine',
 	DOT_PRODUCT = 'dot_product',
@@ -35,6 +35,7 @@ export interface DB2VectorStoreConfig {
 	embeddingFunction: Embeddings;
 	tableName: string;
 	distanceStrategy?: DistanceStrategy;
+	useBatchInsert?: boolean;
 	query?: string;
 	params?: Record<string, any>;
 }
@@ -78,7 +79,7 @@ export interface SearchFilter {
  */
 export interface AddTextsOptions {
 	ids?: string[];
-	metadatas?: Record<string, any>[];
+	metadatas?: Array<Record<string, any>>;
 }
 
 /**
