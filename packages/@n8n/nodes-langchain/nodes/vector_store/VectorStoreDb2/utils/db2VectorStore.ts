@@ -3,18 +3,19 @@
  * Ported from db2vs.py
  */
 
+import { randomUUID } from 'crypto';
 import { Document } from '@langchain/core/documents';
 import type { Embeddings } from '@langchain/core/embeddings';
 import { VectorStore } from '@langchain/core/vectorstores';
 
+import { validateIdentifier, getQuotedIdentifier, createSafeErrorMessage } from './db2Security';
 import {
-	validateIdentifier,
-	getQuotedIdentifier,
-	sanitizeSqlString,
-	createSafeErrorMessage,
-} from './db2Security';
-import type { DistanceStrategy, DB2VectorStoreConfig, ColumnMapping, SearchFilter } from './types';
-import { DistanceStrategy as DS } from './types';
+	DistanceStrategy as DS,
+	type DistanceStrategy,
+	type DB2VectorStoreConfig,
+	type ColumnMapping,
+	type SearchFilter,
+} from './types';
 
 /**
  * Get quoted table identifier
@@ -56,7 +57,7 @@ async function getColumnNames(client: any, tableName: string): Promise<ColumnMap
 		ORDER BY COLNO
 	`;
 
-	return new Promise((resolve, reject) => {
+	return await new Promise((resolve, reject) => {
 		client.query(query, [tableName.toUpperCase()], (err: Error, results: any[]) => {
 			if (err) {
 				reject(err);
@@ -124,6 +125,35 @@ function getDistanceFunction(distanceStrategy: DistanceStrategy): string {
 }
 
 /**
+ * Get existing table's vector dimension
+ */
+async function getTableVectorDimension(client: any, tableName: string): Promise<number | null> {
+	const query = `
+		SELECT LENGTH, SCALE
+		FROM SYSCAT.COLUMNS
+		WHERE TABNAME = ? AND COLNAME = 'EMBEDDING'
+	`;
+
+	return await new Promise((resolve, reject) => {
+		client.query(query, [tableName.toUpperCase()], (err: Error, results: any[]) => {
+			if (err) {
+				reject(err);
+				return;
+			}
+
+			if (!results || results.length === 0) {
+				resolve(null);
+				return;
+			}
+
+			// DB2 vector type stores dimension in LENGTH column
+			const dimension = results[0].LENGTH;
+			resolve(dimension);
+		});
+	});
+}
+
+/**
  * Create table for vector storage
  */
 async function createTable(client: any, tableName: string, embeddingDim: number): Promise<void> {
@@ -185,6 +215,7 @@ export class DB2VectorStore extends VectorStore {
 	private tableName: string;
 	private distanceStrategy: DistanceStrategy;
 	private columnNames: ColumnMapping;
+	private useBatchInsert: boolean;
 
 	_vectorstoreType(): string {
 		return 'db2';
@@ -199,6 +230,7 @@ export class DB2VectorStore extends VectorStore {
 		this.client = config.client;
 		this.tableName = validatedTableName;
 		this.distanceStrategy = config.distanceStrategy || DS.EUCLIDEAN;
+		this.useBatchInsert = config.useBatchInsert !== false; // Default to true
 		this.columnNames = {
 			id: '"id"',
 			text: '"text"',
@@ -212,11 +244,28 @@ export class DB2VectorStore extends VectorStore {
 	 */
 	async initialize(): Promise<void> {
 		try {
-			// Get embedding dimension
+			// Get embedding dimension from current model
 			const embeddingDim = await this.getEmbeddingDimension();
 
-			// Create table if it doesn't exist
-			await createTable(this.client, this.tableName, embeddingDim);
+			// Check if table exists
+			const exists = await tableExists(this.client, this.tableName);
+
+			if (exists) {
+				// Validate existing table's dimension matches current model
+				const tableDim = await getTableVectorDimension(this.client, this.tableName);
+				if (tableDim !== null && tableDim !== embeddingDim) {
+					throw new Error(
+						`Embedding dimension mismatch: table has ${tableDim} dimensions, ` +
+							'but current embedding model produces ' +
+							embeddingDim +
+							' dimensions. ' +
+							'Please use a different table name or update the embedding model.',
+					);
+				}
+			} else {
+				// Create table if it doesn't exist
+				await createTable(this.client, this.tableName, embeddingDim);
+			}
 
 			// Get actual column names
 			this.columnNames = await getColumnNames(this.client, this.tableName);
@@ -235,7 +284,7 @@ export class DB2VectorStore extends VectorStore {
 	}
 
 	/**
-	 * Validate embedding dimension
+	 * Validate embedding dimension and values
 	 */
 	private validateEmbeddingDimension(embeddings: number[][]): void {
 		if (embeddings.length === 0) return;
@@ -248,44 +297,25 @@ export class DB2VectorStore extends VectorStore {
 					`Embedding dimension mismatch: expected ${expectedDim}, got ${embedding.length}`,
 				);
 			}
-		}
-	}
 
-	/**
-	 * Filter metadata to keep only essential fields
-	 */
-	private filterMetadata(metadata: Record<string, any>): Record<string, any> {
-		// Extract only essential fields for storage
-		const filtered: Record<string, any> = {};
-
-		// Keep source information if available
-		if (metadata.source) {
-			filtered.source = metadata.source;
-		}
-
-		// Keep line number if available (useful for CSV)
-		if (metadata.line !== undefined) {
-			filtered.line = metadata.line;
-		}
-
-		// Keep any custom fields that are simple types (not nested objects)
-		const allowedFields = ['id', 'title', 'author', 'date', 'category', 'tags'];
-		for (const field of allowedFields) {
-			if (metadata[field] !== undefined && typeof metadata[field] !== 'object') {
-				filtered[field] = metadata[field];
+			// Validate all values are finite numbers (prevent SQL injection)
+			for (const value of embedding) {
+				if (!Number.isFinite(value)) {
+					throw new Error(`Invalid embedding value: ${value}. All values must be finite numbers.`);
+				}
 			}
 		}
-
-		return filtered;
 	}
 
 	/**
 	 * Add documents to the vector store
 	 */
 	async addDocuments(documents: Document[], options?: { ids?: string[] }): Promise<string[]> {
-		const texts = documents.map((doc) => doc.pageContent);
-		const metadatas = documents.map((doc) => this.filterMetadata(doc.metadata || {}));
-		return this.addTexts(texts, metadatas, options);
+		return await this.addVectors(
+			await this.embeddings.embedDocuments(documents.map((doc) => doc.pageContent)),
+			documents,
+			options,
+		);
 	}
 
 	/**
@@ -309,119 +339,181 @@ export class DB2VectorStore extends VectorStore {
 
 		this.validateEmbeddingDimension(vectors);
 
-		// Insert into database
+		if (this.useBatchInsert && vectors.length > 1) {
+			return await this.batchInsertVectors(vectors, documents, ids);
+		} else {
+			return await this.rowByRowInsertVectors(vectors, documents, ids);
+		}
+	}
+
+	/**
+	 * Batch insert vectors using standard DB2 Parameter Array Binding
+	 */
+	private async batchInsertVectors(
+		vectors: number[][],
+		documents: Document[],
+		ids: string[],
+	): Promise<string[]> {
 		const quotedTable = getQuotedTableIdentifier(this.tableName);
 
+		// Use a standard single-row placeholder. The driver handles replication for the array length.
+		const sqlInsert = `
+			INSERT INTO ${quotedTable}
+			(${this.columnNames.id}, ${this.columnNames.text}, ${this.columnNames.metadata}, ${this.columnNames.embedding})
+			VALUES (?, ?, ?, ?)
+		`;
+
+		// Format data into an array of parameter arrays (Matrix structure)
+		const batchData: any[][] = [];
 		for (let i = 0; i < vectors.length; i++) {
-			const id = ids[i];
-			const embedding = vectors[i];
-			const text = documents[i].pageContent;
-			const metadata = this.filterMetadata(documents[i].metadata || {});
+			const embeddingList = `[${vectors[i].join(',')}]`;
+			const metadataJson = JSON.stringify(documents[i].metadata || {});
+			batchData.push([ids[i], documents[i].pageContent, metadataJson, embeddingList]);
+		}
 
-			const embeddingList = `[${embedding.join(',')}]`;
-			const textSanitized = sanitizeSqlString(text);
-			const metadataJson = JSON.stringify(metadata);
-			const metadataSanitized = sanitizeSqlString(metadataJson);
-			const idSanitized = sanitizeSqlString(id);
-			const embeddingSanitized = sanitizeSqlString(embeddingList);
+		// Turn off auto-commit manually if managing transaction scopes safely
+		if (this.client.setAutoCommit) {
+			this.client.setAutoCommit(false);
+		}
 
-			const sqlInsert = `
-				INSERT INTO ${quotedTable}
-				(${this.columnNames.id}, ${this.columnNames.text}, ${this.columnNames.metadata}, ${this.columnNames.embedding})
-				VALUES ('${idSanitized}', '${textSanitized}', '${metadataSanitized}', '${embeddingSanitized}')
-			`;
-
-			try {
-				await new Promise((resolve, reject) => {
-					this.client.query(sqlInsert, (err: Error) => {
-						if (err) {
-							reject(err);
-						} else {
-							resolve(null);
-						}
-					});
+		let statement: any = null;
+		try {
+			// 1. Prepare the query once
+			statement = await new Promise((resolve, reject) => {
+				this.client.prepare(sqlInsert, (err: Error, stmt: any) => {
+					if (err) reject(err);
+					else resolve(stmt);
 				});
-			} catch (error: any) {
-				throw error;
+			});
+
+			// 2. Execute the statement with the full matrix batch array
+			await new Promise((resolve, reject) => {
+				statement.execute(batchData, (err: Error) => {
+					if (err) {
+						const safeMsg = createSafeErrorMessage(err, 'during batch statement execution');
+						reject(new Error(safeMsg));
+					} else {
+						resolve(null);
+					}
+				});
+			});
+
+			// 3. Commit Transaction via driver native API
+			await new Promise((resolve, reject) => {
+				this.client.commit((err: Error) => {
+					if (err) reject(err);
+					else resolve(null);
+				});
+			});
+		} catch (error) {
+			// Rollback on any failure
+			await new Promise((resolve) => {
+				this.client.rollback(() => resolve(null));
+			});
+			throw error;
+		} finally {
+			// CRITICAL: Always close statements to prevent severe CLI memory leaks
+			if (statement) {
+				statement.closeSync();
+			}
+			if (this.client.setAutoCommit) {
+				this.client.setAutoCommit(true); // Restore defaults
 			}
 		}
 
-		// Commit transaction
-		await new Promise((resolve, reject) => {
-			this.client.query('COMMIT', (err: Error) => {
-				if (err) reject(err);
-				else resolve(null);
+		return ids;
+	}
+
+	/**
+	 * Insert vectors row by row
+	 */
+	private async rowByRowInsertVectors(
+		vectors: number[][],
+		documents: Document[],
+		ids: string[],
+	): Promise<string[]> {
+		const quotedTable = getQuotedTableIdentifier(this.tableName);
+
+		const sqlInsert = `
+			INSERT INTO ${quotedTable}
+			(${this.columnNames.id}, ${this.columnNames.text}, ${this.columnNames.metadata}, ${this.columnNames.embedding})
+			VALUES (?, ?, ?, ?)
+		`;
+
+		if (this.client.setAutoCommit) {
+			this.client.setAutoCommit(false);
+		}
+
+		try {
+			for (let i = 0; i < vectors.length; i++) {
+				const id = ids[i];
+				const embeddingList = `[${vectors[i].join(',')}]`;
+				const metadataJson = JSON.stringify(documents[i].metadata || {});
+
+				await new Promise((resolve, reject) => {
+					this.client.query(
+						sqlInsert,
+						[id, documents[i].pageContent, metadataJson, embeddingList],
+						(err: Error) => {
+							if (err) {
+								const safeMsg = createSafeErrorMessage(
+									err,
+									`while inserting document with id ${id}`,
+								);
+								reject(new Error(safeMsg));
+							} else {
+								resolve(null);
+							}
+						},
+					);
+				});
+			}
+
+			// Commit after everything succeeds
+			await new Promise((resolve, reject) => {
+				this.client.commit((err: Error) => {
+					if (err) reject(err);
+					else resolve(null);
+				});
 			});
-		});
+		} catch (error) {
+			await new Promise((resolve) => {
+				this.client.rollback(() => resolve(null));
+			});
+			throw error;
+		} finally {
+			if (this.client.setAutoCommit) {
+				this.client.setAutoCommit(true);
+			}
+		}
 
 		return ids;
 	}
 
 	/**
 	 * Add texts to the vector store
+	 * Delegates to addVectors after generating embeddings
 	 */
 	async addTexts(
 		texts: string[],
-		metadatas?: Record<string, any>[],
+		metadatas?: Array<Record<string, any>>,
 		options?: { ids?: string[] },
 	): Promise<string[]> {
 		if (texts.length === 0) {
 			throw new Error('No texts provided');
 		}
 
-		// Generate or use provided IDs
-		const ids = options?.ids || texts.map(() => this.generateId());
-
 		// Generate embeddings
 		const embeddings = await this.embeddings.embedDocuments(texts);
-		this.validateEmbeddingDimension(embeddings);
 
-		// Insert into database
-		const quotedTable = getQuotedTableIdentifier(this.tableName);
+		// Create Document objects with metadata
+		const documents = texts.map((text, i) => ({
+			pageContent: text,
+			metadata: metadatas?.[i] || {},
+		}));
 
-		for (let i = 0; i < texts.length; i++) {
-			const id = ids[i];
-			const embedding = embeddings[i];
-			const text = texts[i];
-			const metadata = metadatas?.[i] || {};
-
-			const embeddingList = `[${embedding.join(',')}]`;
-			const textSanitized = sanitizeSqlString(text);
-			const metadataJson = JSON.stringify(metadata);
-			const metadataSanitized = sanitizeSqlString(metadataJson);
-			const idSanitized = sanitizeSqlString(id);
-			const embeddingSanitized = sanitizeSqlString(embeddingList);
-
-			const sqlInsert = `
-				INSERT INTO ${quotedTable}
-				(${this.columnNames.id}, ${this.columnNames.text}, ${this.columnNames.metadata}, ${this.columnNames.embedding})
-				VALUES ('${idSanitized}', '${textSanitized}', '${metadataSanitized}', '${embeddingSanitized}')
-			`;
-
-			try {
-				await new Promise((resolve, reject) => {
-					this.client.query(sqlInsert, (err: Error) => {
-						if (err) {
-							reject(err);
-						} else {
-							resolve(null);
-						}
-					});
-				});
-			} catch (error: any) {
-				throw error;
-			}
-		}
-
-		// Commit transaction
-		await new Promise((resolve, reject) => {
-			this.client.query('COMMIT', (err: Error) => {
-				if (err) reject(err);
-				else resolve(null);
-			});
-		});
-
-		return ids;
+		// Delegate to addVectors to avoid code duplication
+		return await this.addVectors(embeddings, documents, options);
 	}
 
 	/**
@@ -429,7 +521,7 @@ export class DB2VectorStore extends VectorStore {
 	 */
 	async similaritySearch(query: string, k: number = 4, filter?: SearchFilter): Promise<Document[]> {
 		const embedding = await this.embeddings.embedQuery(query);
-		return this.similaritySearchVectorWithScore(embedding, k, filter).then((results) =>
+		return await this.similaritySearchVectorWithScore(embedding, k, filter).then((results) =>
 			results.map((result) => result[0]),
 		);
 	}
@@ -441,9 +533,9 @@ export class DB2VectorStore extends VectorStore {
 		query: string,
 		k: number = 4,
 		filter?: SearchFilter,
-	): Promise<[Document, number][]> {
+	): Promise<Array<[Document, number]>> {
 		const embedding = await this.embeddings.embedQuery(query);
-		return this.similaritySearchVectorWithScore(embedding, k, filter);
+		return await this.similaritySearchVectorWithScore(embedding, k, filter);
 	}
 
 	/**
@@ -452,39 +544,59 @@ export class DB2VectorStore extends VectorStore {
 	async similaritySearchVectorWithScore(
 		embedding: number[],
 		k: number = 4,
-		_filter?: SearchFilter,
-	): Promise<[Document, number][]> {
+		filter?: SearchFilter,
+	): Promise<Array<[Document, number]>> {
 		const distanceFunc = getDistanceFunction(this.distanceStrategy);
 		const quotedTable = getQuotedTableIdentifier(this.tableName);
 
 		const embeddingList = `[${embedding.join(',')}]`;
-		const embeddingSanitized = sanitizeSqlString(embeddingList);
 		const vectorDimension = embedding.length;
+
+		// Build filter clause if provided
+		let filterClause = '';
+		const queryParams: any[] = [];
+
+		if (filter && Object.keys(filter).length > 0) {
+			const filterConditions: string[] = [];
+			for (const [key, value] of Object.entries(filter)) {
+				// Simple equality filter on metadata JSON field
+				// For more complex filters, this would need to be expanded
+				filterConditions.push(`JSON_VALUE(${this.columnNames.metadata}, '$.${key}') = ?`);
+				queryParams.push(String(value));
+			}
+			if (filterConditions.length > 0) {
+				filterClause = `WHERE ${filterConditions.join(' AND ')}`;
+			}
+		}
 
 		// DB2 requires the VECTOR() constructor function to create a vector from string
 		// Format: VECTOR('[1,2,3,...]', dimension, FLOAT32)
 		// Function name is lowercase: vector_distance
+		// Note: VECTOR constructor parameter cannot be parameterized, but the embedding data
+		// is numeric and validated, so it's safe to interpolate
 		const query = `
 			SELECT ${this.columnNames.id}, ${this.columnNames.text},
 			       ${this.columnNames.metadata}, ${this.columnNames.embedding},
 			       vector_distance(
 			           ${this.columnNames.embedding},
-			           VECTOR('${embeddingSanitized}', ${vectorDimension}, FLOAT32),
+			           VECTOR('${embeddingList}', ${vectorDimension}, FLOAT32),
 			           ${distanceFunc}
 			       ) AS distance
 			FROM ${quotedTable}
+			${filterClause}
 			ORDER BY distance
 			FETCH FIRST ${k} ROWS ONLY
 		`;
 
-		return new Promise((resolve, reject) => {
-			this.client.query(query, (err: Error, results: any[]) => {
+		return await new Promise((resolve, reject) => {
+			this.client.query(query, queryParams, (err: Error, results: any[]) => {
 				if (err) {
-					reject(err);
+					const safeMsg = createSafeErrorMessage(err, 'during similarity search');
+					reject(new Error(safeMsg));
 					return;
 				}
 
-				const documents: [Document, number][] = results.map((result) => {
+				const documents: Array<[Document, number]> = results.map((result) => {
 					const metaRaw = result[this.columnNames.metadata.replace(/"/g, '').toUpperCase()];
 					let metadata = {};
 					try {
@@ -508,32 +620,6 @@ export class DB2VectorStore extends VectorStore {
 	}
 
 	/**
-	 * Maximum marginal relevance search
-	 */
-	async maxMarginalRelevanceSearch(
-		query: string,
-		options: {
-			k: number;
-			fetchK?: number;
-			lambda?: number;
-			filter?: SearchFilter;
-		},
-	): Promise<Document[]> {
-		const { k, fetchK = 20 } = options;
-		const embedding = await this.embeddings.embedQuery(query);
-
-		// Fetch more documents than needed
-		const docsAndScores = await this.similaritySearchVectorWithScore(embedding, fetchK);
-
-		// Extract embeddings (we need to fetch them separately in a real implementation)
-		const documents = docsAndScores.map(([doc]) => doc);
-
-		// For now, return top k documents
-		// Full MMR implementation would require fetching embeddings
-		return documents.slice(0, k);
-	}
-
-	/**
 	 * Delete documents by IDs
 	 */
 	async delete(options: { ids: string[] }): Promise<void> {
@@ -543,29 +629,48 @@ export class DB2VectorStore extends VectorStore {
 		}
 
 		const quotedTable = getQuotedTableIdentifier(this.tableName);
-		const placeholders = ids.map((id) => `'${sanitizeSqlString(id)}'`).join(',');
+
+		// Use parameterized query with placeholders
+		const placeholders = ids.map(() => '?').join(',');
 		const ddl = `DELETE FROM ${quotedTable} WHERE ${this.columnNames.id} IN (${placeholders})`;
 
-		await new Promise((resolve, reject) => {
-			this.client.query(ddl, (err: Error) => {
-				if (err) reject(err);
-				else resolve(null);
+		try {
+			await new Promise((resolve, reject) => {
+				this.client.query(ddl, ids, (err: Error) => {
+					if (err) {
+						const safeMsg = createSafeErrorMessage(err, 'while deleting documents');
+						reject(new Error(safeMsg));
+					} else {
+						resolve(null);
+					}
+				});
 			});
-		});
 
-		await new Promise((resolve, reject) => {
-			this.client.query('COMMIT', (err: Error) => {
-				if (err) reject(err);
-				else resolve(null);
+			await new Promise((resolve, reject) => {
+				this.client.query('COMMIT', (err: Error) => {
+					if (err) {
+						const safeMsg = createSafeErrorMessage(err, 'while committing deletion');
+						reject(new Error(safeMsg));
+					} else {
+						resolve(null);
+					}
+				});
 			});
-		});
+		} catch (error) {
+			// Rollback on error
+			await new Promise((resolve) => {
+				this.client.query('ROLLBACK', () => resolve(null));
+			});
+			throw error;
+		}
 	}
 
 	/**
-	 * Generate a unique ID
+	 * Generate a unique ID using crypto.randomUUID()
+	 * This ensures no collisions even in high-volume batch operations
 	 */
 	private generateId(): string {
-		return `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
+		return randomUUID();
 	}
 
 	/**
@@ -573,7 +678,7 @@ export class DB2VectorStore extends VectorStore {
 	 */
 	static async fromTexts(
 		texts: string[],
-		metadatas: Record<string, any>[] | Record<string, any>,
+		metadatas: Array<Record<string, any>> | Record<string, any>,
 		embeddings: Embeddings,
 		dbConfig: Omit<DB2VectorStoreConfig, 'embeddingFunction'>,
 	): Promise<DB2VectorStore> {
