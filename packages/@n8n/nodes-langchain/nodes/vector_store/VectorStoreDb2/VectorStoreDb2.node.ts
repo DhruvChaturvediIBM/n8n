@@ -1,7 +1,11 @@
-import { NodeOperationError, type INodeProperties } from 'n8n-workflow';
+import type { IExecuteFunctions, INodeProperties, ISupplyDataFunctions } from 'n8n-workflow';
+import { NodeOperationError } from 'n8n-workflow';
+import type { Embeddings } from '@langchain/core/embeddings';
+import type { Document } from '@langchain/core/documents';
 import { createVectorStoreNode, metadataFilterField } from '@n8n/ai-utilities';
 import { DB2VectorStore } from './utils/db2VectorStore';
 import type { DistanceStrategy } from './utils/types';
+import { validateConnectionConfig } from './utils/db2Security';
 
 const sharedFields: INodeProperties[] = [
 	{
@@ -105,6 +109,22 @@ function buildConnectionConfig(credentials: any): any {
  * Get or create a DB2 connection from the pool
  */
 async function getConnection(credentials: any): Promise<any> {
+	// Validate connection configuration
+	const validation = validateConnectionConfig({
+		hostname: credentials.host,
+		port: credentials.port,
+		database: credentials.database,
+		username: credentials.user,
+		password: credentials.password,
+	});
+
+	if (!validation.valid) {
+		throw new NodeOperationError(
+			{ type: 'n8n-nodes-base.vectorStoreDb2' } as any,
+			`Invalid DB2 connection configuration: ${validation.error}`,
+		);
+	}
+
 	const config = buildConnectionConfig(credentials);
 	const poolKey = `${credentials.host}:${credentials.port}:${credentials.database}:${credentials.user}`;
 
@@ -160,7 +180,7 @@ export class VectorStoreDb2 extends createVectorStoreNode({
 		displayName: 'DB2 Vector Store',
 		name: 'vectorStoreDb2',
 		description: 'Work with IBM DB2 Vector Store for embeddings and similarity search',
-		icon: 'file:Db2.svg',
+		icon: 'file:db2.svg',
 		docsUrl:
 			'https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.vectorstoredb2/',
 		credentials: [
@@ -176,7 +196,12 @@ export class VectorStoreDb2 extends createVectorStoreNode({
 	loadFields: retrieveFields,
 	retrieveFields,
 	updateFields: [],
-	async getVectorStoreClient(context, _filter, embeddings, itemIndex) {
+	async getVectorStoreClient(
+		context: IExecuteFunctions | ISupplyDataFunctions,
+		_filter: unknown,
+		embeddings: Embeddings,
+		itemIndex: number,
+	) {
 		const credentials = await context.getCredentials('db2Api');
 		const tableName = context.getNodeParameter('tableName', itemIndex) as string;
 		const distanceStrategy = context.getNodeParameter(
@@ -201,7 +226,12 @@ export class VectorStoreDb2 extends createVectorStoreNode({
 			);
 		}
 	},
-	async populateVectorStore(context, embeddings, documents, itemIndex) {
+	async populateVectorStore(
+		context: IExecuteFunctions | ISupplyDataFunctions,
+		embeddings: Embeddings,
+		documents: Document[],
+		itemIndex: number,
+	) {
 		const credentials = await context.getCredentials('db2Api');
 		const tableName = context.getNodeParameter('tableName', itemIndex) as string;
 		const distanceStrategy = context.getNodeParameter(
@@ -236,7 +266,7 @@ export class VectorStoreDb2 extends createVectorStoreNode({
 			);
 		}
 	},
-	releaseVectorStoreClient(_vectorStore) {
+	releaseVectorStoreClient(_vectorStore: DB2VectorStore) {
 		// Connections are managed by the pool and reused
 		// They will be closed when the process exits or on connection errors
 		// Individual vector store instances don't own the connection
