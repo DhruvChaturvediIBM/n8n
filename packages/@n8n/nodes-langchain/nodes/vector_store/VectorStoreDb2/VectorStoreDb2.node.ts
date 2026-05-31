@@ -126,7 +126,10 @@ async function getConnection(credentials: any): Promise<any> {
 	}
 
 	const config = buildConnectionConfig(credentials);
-	const poolKey = `${credentials.host}:${credentials.port}:${credentials.database}:${credentials.user}`;
+
+	// Include all connection-affecting parameters in pool key to prevent incorrect reuse
+	// Password, SSL, and timeout affect connection behavior and must be part of the key
+	const poolKey = `${credentials.host}:${credentials.port}:${credentials.database}:${credentials.user}:${credentials.password}:${credentials.ssl || false}:${credentials.connectionTimeout || 30}`;
 
 	// Check if we have a valid connection in the pool
 	let client = connectionPool.get(poolKey);
