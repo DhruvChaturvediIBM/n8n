@@ -4,7 +4,8 @@
 		"outDir": "dist",
 		"module": "commonjs",
 		"declaration": true,
-		"tsBuildInfoFile": "dist/typecheck.tsbuildinfo"
+		"tsBuildInfoFile": "dist/typecheck.tsbuildinfo",
+		"skipLibCheck": true
 	},
 	"include": [
 		"credentials/**/*.ts",

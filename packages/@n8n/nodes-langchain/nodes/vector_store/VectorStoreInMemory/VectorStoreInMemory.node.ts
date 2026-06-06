@@ -187,7 +187,7 @@ export class VectorStoreInMemory extends createVectorStoreNode<MemoryVectorStore
 		const memoryKey = getMemoryKey(context, itemIndex);
 		const vectorStoreSingleton = MemoryVectorStoreManager.getInstance(embeddings, context.logger);
 
-		return await vectorStoreSingleton.getVectorStore(memoryKey);
+		return (await vectorStoreSingleton.getVectorStore(memoryKey)) as any;
 	},
 	async populateVectorStore(context, embeddings, documents, itemIndex) {
 		const memoryKey = getMemoryKey(context, itemIndex);

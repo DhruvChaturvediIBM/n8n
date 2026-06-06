@@ -40,23 +40,9 @@ const sharedFields: INodeProperties[] = [
 ];
 
 const insertFields: INodeProperties[] = [
-	{
-		displayName: 'Options',
-		name: 'options',
-		type: 'collection',
-		placeholder: 'Add Option',
-		default: {},
-		options: [
-			{
-				displayName: 'Use Batch Insert',
-				name: 'useBatchInsert',
-				type: 'boolean',
-				default: true,
-				description:
-					'Whether to use batch insertion for better performance. Disable for row-by-row insertion.',
-			},
-		],
-	},
+	// Note: Batch insert option removed because ibm_db's row-wise array insert
+	// does not work correctly with DB2 functions like VECTOR() and SYSTOOLS.JSON2BSON()
+	// in the VALUES clause. Row-by-row insert is always used for reliability.
 ];
 
 const retrieveFields: INodeProperties[] = [
@@ -238,11 +224,6 @@ export class VectorStoreDb2 extends createVectorStoreNode({
 			'distanceStrategy',
 			itemIndex,
 		) as DistanceStrategy;
-		const useBatchInsert = context.getNodeParameter(
-			'options.useBatchInsert',
-			itemIndex,
-			true,
-		) as boolean;
 
 		try {
 			// Get connection from pool
@@ -253,7 +234,6 @@ export class VectorStoreDb2 extends createVectorStoreNode({
 				tableName,
 				distanceStrategy,
 				embeddingFunction: embeddings,
-				useBatchInsert,
 			});
 
 			await vectorStore.initialize();

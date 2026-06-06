@@ -3,7 +3,7 @@
  * Ported from db2vs.py
  */
 
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { Document } from '@langchain/core/documents';
 import type { Embeddings } from '@langchain/core/embeddings';
 import { VectorStore } from '@langchain/core/vectorstores';
@@ -160,9 +160,9 @@ async function createTable(client: any, tableName: string, embeddingDim: number)
 	const validatedTableName = validateIdentifier(tableName, 'table name');
 
 	const colsDict = {
-		id: 'VARCHAR(100) PRIMARY KEY NOT NULL',
-		text: 'CLOB(10M)',
-		metadata: 'CLOB(1M)',
+		id: 'CHAR(16) PRIMARY KEY NOT NULL',
+		text: 'CLOB',
+		metadata: 'BLOB',
 		embedding: `vector(${embeddingDim}, FLOAT32)`,
 	};
 
@@ -183,7 +183,7 @@ async function createTable(client: any, tableName: string, embeddingDim: number)
 		});
 
 		await new Promise((resolve, reject) => {
-			client.query('COMMIT', (err: Error) => {
+			client.commitTransaction((err: Error) => {
 				if (err) reject(err);
 				else resolve(null);
 			});
@@ -215,7 +215,6 @@ export class DB2VectorStore extends VectorStore {
 	private tableName: string;
 	private distanceStrategy: DistanceStrategy;
 	private columnNames: ColumnMapping;
-	private useBatchInsert: boolean;
 
 	_vectorstoreType(): string {
 		return 'db2';
@@ -230,7 +229,6 @@ export class DB2VectorStore extends VectorStore {
 		this.client = config.client;
 		this.tableName = validatedTableName;
 		this.distanceStrategy = config.distanceStrategy || DS.EUCLIDEAN;
-		this.useBatchInsert = config.useBatchInsert !== false; // Default to true
 		this.columnNames = {
 			id: '"id"',
 			text: '"text"',
@@ -334,95 +332,43 @@ export class DB2VectorStore extends VectorStore {
 			throw new Error('Number of vectors and documents must match');
 		}
 
-		// Generate or use provided IDs
-		const ids = options?.ids || vectors.map(() => this.generateId());
+		// Generate or use provided IDs - hash and truncate to 16 chars like Python implementation
+		const ids = options?.ids
+			? options.ids.map((id) => this.hashAndTruncateId(id))
+			: vectors.map(() => this.hashAndTruncateId(randomUUID()));
 
 		this.validateEmbeddingDimension(vectors);
 
-		if (this.useBatchInsert && vectors.length > 1) {
-			return await this.batchInsertVectors(vectors, documents, ids);
-		} else {
-			return await this.rowByRowInsertVectors(vectors, documents, ids);
-		}
+		// Always use row-by-row insert for DB2 vector operations
+		// Batch insert with ibm_db's row-wise array insert does not work correctly
+		// with DB2 functions like VECTOR() and SYSTOOLS.JSON2BSON() in the VALUES clause.
+		// The driver's parameter counting mechanism gets confused by the function wrappers,
+		// resulting in "Wrong number of parameters" errors even though the SQL is correct.
+		// Row-by-row insert works reliably with these DB2-specific functions.
+		return await this.rowByRowInsertVectors(vectors, documents, ids);
 	}
 
 	/**
-	 * Batch insert vectors using standard DB2 Parameter Array Binding
+	 * NOTE: Batch insert is not used for DB2 vector operations.
+	 *
+	 * The ibm_db driver's row-wise array insert mechanism does not work correctly
+	 * with DB2-specific functions like VECTOR() and SYSTOOLS.JSON2BSON() in the
+	 * VALUES clause. The driver's parameter counting gets confused by the function
+	 * wrappers, resulting in "CLI0100E Wrong number of parameters. SQLSTATE=07001"
+	 * errors even though the SQL statement is syntactically correct.
+	 *
+	 * Example SQL that fails with batch insert but works with row-by-row:
+	 * INSERT INTO table (id, embedding, metadata, text)
+	 * VALUES (?, VECTOR(?, 768, FLOAT32), SYSTOOLS.JSON2BSON(?), ?)
+	 *
+	 * The driver expects 4 parameters (one per ?), but the functions wrapping
+	 * some parameters confuse the batch insert mechanism. Row-by-row insert
+	 * works reliably because it processes each statement individually.
+	 *
+	 * Python's ibm_db_dbi.cursor.executemany() may handle this differently,
+	 * but the Node.js ibm_db library does not have an equivalent that works
+	 * with DB2 functions in the VALUES clause.
 	 */
-	private async batchInsertVectors(
-		vectors: number[][],
-		documents: Document[],
-		ids: string[],
-	): Promise<string[]> {
-		const quotedTable = getQuotedTableIdentifier(this.tableName);
-
-		// Use a standard single-row placeholder. The driver handles replication for the array length.
-		const sqlInsert = `
-			INSERT INTO ${quotedTable}
-			(${this.columnNames.id}, ${this.columnNames.text}, ${this.columnNames.metadata}, ${this.columnNames.embedding})
-			VALUES (?, ?, ?, ?)
-		`;
-
-		// Format data into an array of parameter arrays (Matrix structure)
-		const batchData: any[][] = [];
-		for (let i = 0; i < vectors.length; i++) {
-			const embeddingList = `[${vectors[i].join(',')}]`;
-			const metadataJson = JSON.stringify(documents[i].metadata || {});
-			batchData.push([ids[i], documents[i].pageContent, metadataJson, embeddingList]);
-		}
-
-		// Turn off auto-commit manually if managing transaction scopes safely
-		if (this.client.setAutoCommit) {
-			this.client.setAutoCommit(false);
-		}
-
-		let statement: any = null;
-		try {
-			// 1. Prepare the query once
-			statement = await new Promise((resolve, reject) => {
-				this.client.prepare(sqlInsert, (err: Error, stmt: any) => {
-					if (err) reject(err);
-					else resolve(stmt);
-				});
-			});
-
-			// 2. Execute the statement with the full matrix batch array
-			await new Promise((resolve, reject) => {
-				statement.execute(batchData, (err: Error) => {
-					if (err) {
-						const safeMsg = createSafeErrorMessage(err, 'during batch statement execution');
-						reject(new Error(safeMsg));
-					} else {
-						resolve(null);
-					}
-				});
-			});
-
-			// 3. Commit Transaction via driver native API
-			await new Promise((resolve, reject) => {
-				this.client.commit((err: Error) => {
-					if (err) reject(err);
-					else resolve(null);
-				});
-			});
-		} catch (error) {
-			// Rollback on any failure
-			await new Promise((resolve) => {
-				this.client.rollback(() => resolve(null));
-			});
-			throw error;
-		} finally {
-			// CRITICAL: Always close statements to prevent severe CLI memory leaks
-			if (statement) {
-				statement.closeSync();
-			}
-			if (this.client.setAutoCommit) {
-				this.client.setAutoCommit(true); // Restore defaults
-			}
-		}
-
-		return ids;
-	}
 
 	/**
 	 * Insert vectors row by row
@@ -434,17 +380,27 @@ export class DB2VectorStore extends VectorStore {
 	): Promise<string[]> {
 		const quotedTable = getQuotedTableIdentifier(this.tableName);
 
+		// Get vector dimension from first vector
+		const vectorDimension = vectors[0]?.length || 0;
+
+		// Match Python implementation column order: id, embedding, metadata, text
+		// IMPORTANT: Use VECTOR() function for embedding and SYSTOOLS.JSON2BSON() for metadata
+		// to match Python implementation (db2vs.py lines 335-338)
 		const sqlInsert = `
 			INSERT INTO ${quotedTable}
-			(${this.columnNames.id}, ${this.columnNames.text}, ${this.columnNames.metadata}, ${this.columnNames.embedding})
-			VALUES (?, ?, ?, ?)
+			(${this.columnNames.id}, ${this.columnNames.embedding}, ${this.columnNames.metadata}, ${this.columnNames.text})
+			VALUES (?, VECTOR(?, ${vectorDimension}, FLOAT32), SYSTOOLS.JSON2BSON(?), ?)
 		`;
 
-		if (this.client.setAutoCommit) {
-			this.client.setAutoCommit(false);
-		}
-
 		try {
+			// Begin transaction
+			await new Promise((resolve, reject) => {
+				this.client.beginTransaction((err: Error) => {
+					if (err) reject(err);
+					else resolve(null);
+				});
+			});
+
 			for (let i = 0; i < vectors.length; i++) {
 				const id = ids[i];
 				const embeddingList = `[${vectors[i].join(',')}]`;
@@ -453,7 +409,8 @@ export class DB2VectorStore extends VectorStore {
 				await new Promise((resolve, reject) => {
 					this.client.query(
 						sqlInsert,
-						[id, documents[i].pageContent, metadataJson, embeddingList],
+						// Data order: id, embedding, metadata, text (matching Python implementation and SQL column order)
+						[id, embeddingList, metadataJson, documents[i].pageContent],
 						(err: Error) => {
 							if (err) {
 								const safeMsg = createSafeErrorMessage(
@@ -471,20 +428,21 @@ export class DB2VectorStore extends VectorStore {
 
 			// Commit after everything succeeds
 			await new Promise((resolve, reject) => {
-				this.client.commit((err: Error) => {
+				this.client.commitTransaction((err: Error) => {
 					if (err) reject(err);
 					else resolve(null);
 				});
 			});
 		} catch (error) {
-			await new Promise((resolve) => {
-				this.client.rollback(() => resolve(null));
-			});
-			throw error;
-		} finally {
-			if (this.client.setAutoCommit) {
-				this.client.setAutoCommit(true);
+			// Rollback on any failure
+			try {
+				await new Promise((resolve) => {
+					this.client.rollbackTransaction(() => resolve(null));
+				});
+			} catch (rollbackError) {
+				// Ignore rollback errors, throw original error
 			}
+			throw error;
 		}
 
 		return ids;
@@ -635,6 +593,14 @@ export class DB2VectorStore extends VectorStore {
 		const ddl = `DELETE FROM ${quotedTable} WHERE ${this.columnNames.id} IN (${placeholders})`;
 
 		try {
+			// Begin transaction
+			await new Promise((resolve, reject) => {
+				this.client.beginTransaction((err: Error) => {
+					if (err) reject(err);
+					else resolve(null);
+				});
+			});
+
 			await new Promise((resolve, reject) => {
 				this.client.query(ddl, ids, (err: Error) => {
 					if (err) {
@@ -647,7 +613,7 @@ export class DB2VectorStore extends VectorStore {
 			});
 
 			await new Promise((resolve, reject) => {
-				this.client.query('COMMIT', (err: Error) => {
+				this.client.commitTransaction((err: Error) => {
 					if (err) {
 						const safeMsg = createSafeErrorMessage(err, 'while committing deletion');
 						reject(new Error(safeMsg));
@@ -659,18 +625,20 @@ export class DB2VectorStore extends VectorStore {
 		} catch (error) {
 			// Rollback on error
 			await new Promise((resolve) => {
-				this.client.query('ROLLBACK', () => resolve(null));
+				this.client.rollbackTransaction(() => resolve(null));
 			});
 			throw error;
 		}
 	}
 
 	/**
-	 * Generate a unique ID using crypto.randomUUID()
-	 * This ensures no collisions even in high-volume batch operations
+	 * Hash and truncate ID to 16 characters (matching Python implementation)
+	 * Python: hashlib.sha256(_id.encode()).hexdigest()[:16].upper()
+	 * This ensures IDs fit in CHAR(16) column
 	 */
-	private generateId(): string {
-		return randomUUID();
+	private hashAndTruncateId(id: string): string {
+		const hash = createHash('sha256').update(id).digest('hex');
+		return hash.substring(0, 16).toUpperCase();
 	}
 
 	/**

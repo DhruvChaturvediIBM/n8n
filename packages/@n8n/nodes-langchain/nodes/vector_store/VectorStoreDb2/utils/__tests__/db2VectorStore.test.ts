@@ -167,7 +167,6 @@ describe('DB2VectorStore', () => {
 				client: mockClient,
 				embeddingFunction: mockEmbeddings,
 				tableName: 'test_vectors',
-				useBatchInsert: false, // Use row-by-row for these tests
 			});
 
 			mockEmbeddings.embedQuery.mockResolvedValue([0.1, 0.2, 0.3]);
@@ -258,7 +257,6 @@ describe('DB2VectorStore', () => {
 				client: mockClient,
 				embeddingFunction: mockEmbeddings,
 				tableName: 'test_vectors',
-				useBatchInsert: false, // Use row-by-row for these tests
 			});
 
 			mockEmbeddings.embedQuery.mockResolvedValue([0.1, 0.2, 0.3]);
@@ -314,7 +312,6 @@ describe('DB2VectorStore', () => {
 				client: mockClient,
 				embeddingFunction: mockEmbeddings,
 				tableName: 'test_vectors',
-				useBatchInsert: false, // Use row-by-row for these tests
 			});
 
 			mockEmbeddings.embedQuery.mockResolvedValue([0.1, 0.2, 0.3]);
@@ -621,7 +618,6 @@ describe('DB2VectorStore', () => {
 					client: mockClient,
 					embeddingFunction: mockEmbeddings,
 					tableName: 'test_vectors',
-					useBatchInsert: true,
 				});
 
 				await vectorStore.initialize();
@@ -668,7 +664,6 @@ describe('DB2VectorStore', () => {
 					client: mockClient,
 					embeddingFunction: mockEmbeddings,
 					tableName: 'test_vectors',
-					useBatchInsert: false,
 				});
 
 				await vectorStore.initialize();
@@ -706,7 +701,6 @@ describe('DB2VectorStore', () => {
 					client: mockClient,
 					embeddingFunction: mockEmbeddings,
 					tableName: 'test_vectors',
-					// useBatchInsert not specified - should default to true
 				});
 
 				await vectorStore.initialize();
@@ -749,7 +743,6 @@ describe('DB2VectorStore', () => {
 					client: mockClient,
 					embeddingFunction: mockEmbeddings,
 					tableName: 'test_vectors',
-					useBatchInsert: true,
 				});
 
 				mockEmbeddings.embedQuery.mockResolvedValue([0.1, 0.2, 0.3]);

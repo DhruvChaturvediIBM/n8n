@@ -90,7 +90,6 @@
       "dist/credentials/DatabricksApi.credentials.js",
       "dist/credentials/DatabricksOAuth2Api.credentials.js",
       "dist/credentials/DatadogApi.credentials.js",
-      "dist/credentials/Db2.credentials.js",
       "dist/credentials/DeepLApi.credentials.js",
       "dist/credentials/DemioApi.credentials.js",
       "dist/credentials/DfirIrisApi.credentials.js",

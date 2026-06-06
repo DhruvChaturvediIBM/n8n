@@ -1,9 +1,9 @@
-import type { IAuthenticateGeneric, ICredentialType, INodeProperties } from 'n8n-workflow';
+import type { ICredentialType, INodeProperties } from 'n8n-workflow';
 
 export class Db2Api implements ICredentialType {
 	name = 'db2Api';
 
-	displayName = 'IBM DB2';
+	displayName = 'DB2 API';
 
 	documentationUrl = 'db2';
 
@@ -22,7 +22,7 @@ export class Db2Api implements ICredentialType {
 			type: 'number',
 			default: 50000,
 			required: true,
-			description: 'The port number of the DB2 server (default: 50000)',
+			description: 'The port number of the DB2 server',
 		},
 		{
 			displayName: 'Database',
@@ -44,9 +44,7 @@ export class Db2Api implements ICredentialType {
 			displayName: 'Password',
 			name: 'password',
 			type: 'string',
-			typeOptions: {
-				password: true,
-			},
+			typeOptions: { password: true },
 			default: '',
 			required: true,
 			description: 'The password for authentication',
@@ -62,16 +60,13 @@ export class Db2Api implements ICredentialType {
 			displayName: 'SSL Certificate',
 			name: 'sslCertificate',
 			type: 'string',
-			typeOptions: {
-				password: true,
-			},
+			default: '',
 			displayOptions: {
 				show: {
 					ssl: [true],
 				},
 			},
-			default: '',
-			description: 'The SSL/TLS certificate for secure connections (optional)',
+			description: 'Path to the SSL certificate file (must be accessible to n8n process)',
 		},
 		{
 			displayName: 'Connection Timeout',
@@ -81,11 +76,6 @@ export class Db2Api implements ICredentialType {
 			description: 'Connection timeout in seconds',
 		},
 	];
-
-	authenticate: IAuthenticateGeneric = {
-		type: 'generic',
-		properties: {},
-	};
 }
 
 // Made with Bob

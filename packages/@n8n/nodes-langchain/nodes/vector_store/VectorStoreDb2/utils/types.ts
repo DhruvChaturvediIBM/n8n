@@ -35,7 +35,6 @@ export interface DB2VectorStoreConfig {
 	embeddingFunction: Embeddings;
 	tableName: string;
 	distanceStrategy?: DistanceStrategy;
-	useBatchInsert?: boolean;
 	query?: string;
 	params?: Record<string, any>;
 }
